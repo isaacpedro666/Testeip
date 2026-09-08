@@ -81,6 +81,20 @@ img{display:block;max-width:100%}
 .pill-g{background:var(--glt);color:var(--green)}
 .pill-p{background:rgba(14,74,85,.35);color:var(--petrollt)}
 .pill-r{background:var(--rlt);color:var(--red)}
+.pill-n{background:var(--card2);color:var(--g3lt)}
+
+/* ── LOADER GLOBAL — única fonte de "a processar" em toda a app ── */
+.gl-backdrop{position:fixed;inset:0;z-index:900;background:rgba(2,6,23,.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;padding:20px}
+.gl-box{background:var(--card);border:1px solid var(--g1);border-radius:var(--r-lg);box-shadow:var(--shlg);padding:26px 30px;display:flex;flex-direction:column;align-items:center;gap:14px;min-width:200px}
+.gl-spinner{width:34px;height:34px;border-radius:50%;border:3px solid var(--g1);border-top-color:var(--vbtn);animation:gl-spin .8s linear infinite}
+@keyframes gl-spin{to{transform:rotate(360deg)}}
+.gl-msg{font-size:13.5px;font-weight:700;color:#fff;text-align:center}
+
+/* ── TOAST — confirmação/erro breve após a operação terminar ── */
+.gtoast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);z-index:901;padding:12px 20px;border-radius:14px;font-size:13px;font-weight:700;box-shadow:var(--shlg);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;max-width:90vw;text-align:center}
+.gtoast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.gtoast-ok{background:var(--glt);color:var(--green);border:1px solid var(--vlt)}
+.gtoast-err{background:var(--rlt);color:var(--red);border:1px solid var(--red)}
 
 .stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:26px}
 .stat-card{background:var(--card);border:1px solid var(--g1);border-radius:var(--r);padding:16px 18px;box-shadow:var(--sh)}
@@ -502,55 +516,196 @@ function renderTopbar(){
    rule "allow update" recusa qualquer roles que contenha 'ADMIN'.
    Papéis comerciais (SELLER/SERVICE_PROVIDER/FREELANCER) nunca ficam
    ACTIVE aqui — só PENDING (a aguardar aprovação de um ADMIN via
-   approveCommercialStatus) ou de volta a NONE se o pedido for cancelado
-   antes de ser decidido. A própria Firestore rule também impõe isto de
-   forma independente — mesmo que este código tivesse um erro, a regra
-   recusaria qualquer tentativa de escrever ACTIVE a partir do cliente. */
+   approveCommercialStatus), de volta a NONE se o pedido for cancelado
+   antes de ser decidido, ou de volta a NONE se o utilizador se desligar
+   de um papel já ACTIVE. Em nenhum caso este código escreve ACTIVE ou
+   SUSPENDED. A própria Firestore rule também impõe isto de forma
+   independente — mesmo que este código tivesse um erro, a regra
+   recusaria qualquer tentativa de escrever ACTIVE, ou de sair de ACTIVE
+   para outro valor que não seja NONE, a partir do cliente. */
 const COMMERCIAL_ROLE_STATUS_FIELD = {SELLER:'sellerStatus', SERVICE_PROVIDER:'serviceProviderStatus', FREELANCER:'freelancerStatus'};
-function toggleSelfRole(role){
+function toggleSelfRole(role, btnEl){
   if(!AUTH.uid){ openAuth(); return; }
   if(role==='ADMIN') return;
+  // AFFILIATE deixou de ser um papel global auto-atribuível — a afiliação
+  // passará a ser pedida por oferta/produto/serviço (Fase 2), não aqui.
+  if(role==='AFFILIATE') return;
   const current = (AUTH.userDoc && AUTH.userDoc.roles) || ['CUSTOMER'];
-  const has = current.includes(role);
-  let next = has ? current.filter(function(r){return r!==role;}) : current.concat([role]);
-  if(next.length===0) next = ['CUSTOMER'];
-
-  const update = { roles: next, updatedAt: firebase.firestore.FieldValue.serverTimestamp() };
   const statusField = COMMERCIAL_ROLE_STATUS_FIELD[role];
-  if(statusField){
+  const update = { updatedAt: firebase.firestore.FieldValue.serverTimestamp() };
+  let loaderMsg = 'A processar…';
+
+  if(!statusField){
+    // Papel não-comercial (CUSTOMER): a única fonte de verdade é "roles".
+    const has = current.includes(role);
+    let next = has ? current.filter(function(r){return r!==role;}) : current.concat([role]);
+    if(next.length===0) next = ['CUSTOMER'];
+    update.roles = next;
+    loaderMsg = has ? 'A desactivar papel…' : 'A activar papel…';
+  } else {
+    // Papel comercial: a ÚNICA fonte de verdade é o estatuto comercial
+    // real — o MESMO valor que a interface já usou para decidir qual
+    // botão mostrar (ver render da página "Gerir papéis"). Nunca voltar
+    // a recalcular "tenho ou não o papel" a partir de "roles" sozinho
+    // aqui: se alguma vez divergissem, o botão que o utilizador vê e a
+    // acção que este código executaria deixavam de corresponder um ao
+    // outro — foi exactamente isso que causou "missing or insufficient
+    // permissions" ao cancelar um pedido: o botão dizia "Cancelar" (via
+    // commercialStatus==='PENDING'), mas este código, a decidir sozinho
+    // a partir de roles.includes(role), podia concluir o contrário e
+    // tentar ADICIONAR o papel em vez de o remover.
     const currentStatus = (AUTH.userDoc && AUTH.userDoc[statusField]) || 'NONE';
-    if(!has && currentStatus==='NONE'){
-      // A activar o papel pela 1ª vez → PENDING. Nunca ACTIVE.
+    const hasRoleInArray = current.includes(role);
+    if(currentStatus==='NONE'){
+      update.roles = hasRoleInArray ? current : current.concat([role]);
       update[statusField] = 'PENDING';
-    } else if(has && currentStatus==='PENDING'){
-      // A desligar um papel cujo pedido ainda não foi decidido → cancela,
-      // volta a NONE. Um estatuto já ACTIVE/SUSPENDED nunca é tocado por
-      // aqui (fica reservado a acção de admin).
+      loaderMsg = 'A enviar solicitação…';
+    } else if(currentStatus==='PENDING'){
+      update.roles = hasRoleInArray ? current.filter(function(r){return r!==role;}) : current;
       update[statusField] = 'NONE';
+      loaderMsg = 'A cancelar solicitação…';
+    } else if(currentStatus==='ACTIVE'){
+      update.roles = hasRoleInArray ? current.filter(function(r){return r!==role;}) : current;
+      update[statusField] = 'NONE';
+      loaderMsg = 'A desactivar papel…';
+    } else {
+      // SUSPENDED (ou qualquer valor inesperado): nada accionável pelo
+      // cliente aqui — o próprio botão já vem desactivado nesse estado.
+      return;
     }
+    if(update.roles.length===0) update.roles = ['CUSTOMER'];
   }
 
-  fdb.collection('users').doc(AUTH.uid).update(update)
-    .then(function(){
-      AUTH.userDoc.roles = next;
-      if(statusField && update[statusField]!==undefined) AUTH.userDoc[statusField] = update[statusField];
-      buildNav(); render();
-    })
-    .catch(function(err){ console.error('Erro ao atualizar papéis.', err); alert('Não foi possível atualizar: '+(err.message||'')); });
+  runWithLoader(btnEl, loaderMsg, function(){
+    return fdb.collection('users').doc(AUTH.uid).update(update);
+  }).then(function(){
+    if(update.roles) AUTH.userDoc.roles = update.roles;
+    if(statusField && update[statusField]!==undefined) AUTH.userDoc[statusField] = update[statusField];
+    buildNav(); render();
+  }).catch(function(){ /* runWithLoader já mostrou o erro real (toast) */ });
 }
 
-function requestVerification(){
-  if(!AUTH.uid){ openAuth(); return; }
-  if(AUTH.hasPendingVerification || (AUTH.userDoc && AUTH.userDoc.verificationStatus==='VERIFIED')) return;
-  fdb.collection('verificationRequests').add({
-    uid: AUTH.uid, status:'PENDING', requestedAt: firebase.firestore.FieldValue.serverTimestamp()
-  }).then(function(){
-    AUTH.hasPendingVerification = true;
+/* ── EDIÇÃO DE NOME ──
+   Único campo editável aqui é "name" (users/{uid}) + "displayName"
+   (profiles/{uid}) — ambos já permitidos ao dono pelas Firestore rules
+   existentes, sem nenhuma alteração de regras. Nunca toca em email,
+   status, verificationStatus, ipScore ou rating. */
+function startEditName(){
+  if(!AUTH.uid) return;
+  const holder = document.getElementById('nameDisplay');
+  if(!holder) return;
+  const currentName = (AUTH.userDoc && AUTH.userDoc.name) || AUTH.user.displayName || '';
+  holder.outerHTML = `<div id="nameDisplay">
+    <input id="nameEditInput" type="text" value="${escHtml(currentName)}" maxlength="120"
+      style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--g1);font-size:15px;box-sizing:border-box"/>
+    <div style="margin-top:8px;display:flex;gap:8px">
+      <button class="btn bv bsm" id="nameSaveBtn" onclick="saveEditName(this)">Guardar</button>
+      <button class="btn bo bsm" onclick="render()">Cancelar</button>
+    </div>
+    <div class="auth-err" id="nameEditErr"></div>
+  </div>`;
+  const input = document.getElementById('nameEditInput');
+  if(input){ input.focus(); input.select(); }
+}
+function saveEditName(btnEl){
+  const input = document.getElementById('nameEditInput');
+  const errEl = document.getElementById('nameEditErr');
+  if(!input) return;
+  const val = input.value.trim();
+  if(!val){ if(errEl) errEl.textContent='O nome não pode ficar vazio.'; return; }
+  if(errEl) errEl.textContent = '';
+  const now = firebase.firestore.FieldValue.serverTimestamp();
+  runWithLoader(btnEl, 'A guardar alterações…', function(){
+    return fdb.collection('users').doc(AUTH.uid).update({ name: val, updatedAt: now })
+      .then(function(){ return fdb.collection('profiles').doc(AUTH.uid).update({ displayName: val, updatedAt: now }); });
+  }, 'Nome guardado.').then(function(){
+    if(AUTH.userDoc) AUTH.userDoc.name = val;
+    if(AUTH.profileDoc) AUTH.profileDoc.displayName = val;
     render();
   }).catch(function(err){
-    console.error('Erro ao pedir verificação.', err);
-    alert('Não foi possível enviar o pedido: '+(err.message||''));
+    if(errEl) errEl.textContent = 'Não foi possível guardar: ' + ((err&&(err.message||err.code)) || '');
   });
+}
+
+/* ── EDIÇÃO DE TELEFONE ──
+   Mesmo padrão da edição de nome. Único campo tocado é "phone" em
+   users/{uid} — já permitido ao dono pelas Firestore rules existentes,
+   sem nenhuma alteração de regras. Validação simples do lado do
+   cliente (comprimento mínimo); a regra de segurança real continua a
+   ser a das rules, não esta validação. */
+function startEditPhone(){
+  if(!AUTH.uid) return;
+  const holder = document.getElementById('phoneDisplay');
+  if(!holder) return;
+  const currentPhone = (AUTH.userDoc && AUTH.userDoc.phone) || '';
+  holder.outerHTML = `<div id="phoneDisplay">
+    <input id="phoneEditInput" type="tel" value="${escHtml(currentPhone)}" maxlength="20" placeholder="+244 9xx xxx xxx"
+      style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--g1);font-size:15px;box-sizing:border-box"/>
+    <div style="margin-top:8px;display:flex;gap:8px">
+      <button class="btn bv bsm" id="phoneSaveBtn" onclick="savePhone(this)">Guardar</button>
+      <button class="btn bo bsm" onclick="render()">Cancelar</button>
+    </div>
+    <div class="auth-err" id="phoneEditErr"></div>
+  </div>`;
+  const input = document.getElementById('phoneEditInput');
+  if(input){ input.focus(); }
+}
+function savePhone(btnEl){
+  const input = document.getElementById('phoneEditInput');
+  const errEl = document.getElementById('phoneEditErr');
+  if(!input) return;
+  const val = input.value.trim();
+  if(val && val.replace(/[^0-9]/g,'').length < 9){
+    if(errEl) errEl.textContent = 'Número de telefone demasiado curto.';
+    return;
+  }
+  if(errEl) errEl.textContent = '';
+  const now = firebase.firestore.FieldValue.serverTimestamp();
+  runWithLoader(btnEl, 'A guardar alterações…', function(){
+    return fdb.collection('users').doc(AUTH.uid).update({ phone: val, updatedAt: now });
+  }, 'Telefone guardado.').then(function(){
+    if(AUTH.userDoc) AUTH.userDoc.phone = val;
+    render();
+  }).catch(function(err){
+    if(errEl) errEl.textContent = 'Não foi possível guardar: ' + ((err&&(err.message||err.code)) || '');
+  });
+}
+
+/* ── VERIFICAÇÃO DE IDENTIDADE — estrutura da UI/fluxo apenas ──
+   Não sobe nenhum ficheiro real: isso depende de Firebase Storage
+   (plano Blaze), que ainda não está activado nesta fase. O único efeito
+   real de submeter continua a ser criar o mesmo verificationRequests já
+   suportado pelas rules ({uid, status:'PENDING', requestedAt}) — o tipo
+   de documento e os nomes de ficheiro escolhidos ficam só no ecrã, para
+   dar forma ao fluxo, sem inventar um caminho de escrita novo. */
+let VERIF_FORM = { docType:'', frontName:'', backName:'' };
+function verifDocNeedsBack(type){ return type==='BI' || type==='CARTA'; }
+function onVerifDocTypeChange(sel){
+  VERIF_FORM = { docType: sel.value, frontName:'', backName:'' };
+  render();
+}
+function onVerifFileChange(which, input){
+  VERIF_FORM[which+'Name'] = (input.files && input.files[0]) ? input.files[0].name : '';
+}
+function submitVerificationRequest(btnEl){
+  if(!VERIF_FORM.docType){ alert('Escolhe o tipo de documento antes de submeter.'); return; }
+  if(!VERIF_FORM.frontName){ alert('Selecciona o ficheiro da frente do documento.'); return; }
+  if(verifDocNeedsBack(VERIF_FORM.docType) && !VERIF_FORM.backName){ alert('Este tipo de documento também precisa do verso.'); return; }
+  requestVerification(btnEl);
+  VERIF_FORM = { docType:'', frontName:'', backName:'' };
+}
+
+function requestVerification(btnEl){
+  if(!AUTH.uid){ openAuth(); return; }
+  if(AUTH.hasPendingVerification || (AUTH.userDoc && AUTH.userDoc.verificationStatus==='VERIFIED')) return;
+  runWithLoader(btnEl, 'A enviar solicitação…', function(){
+    return fdb.collection('verificationRequests').add({
+      uid: AUTH.uid, status:'PENDING', requestedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+  }, 'Pedido de verificação enviado.').then(function(){
+    AUTH.hasPendingVerification = true;
+    render();
+  }).catch(function(){ /* runWithLoader já mostrou o erro real (toast) */ });
 }
 
 /* ── ÁRVORE DE NAVEGAÇÃO (espelha exactamente a IA pedida) ── */
@@ -675,6 +830,60 @@ const MOCK = {
 
 function fmt(n){ return new Intl.NumberFormat('pt-AO').format(n); }
 function escHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+/* ── LOADER GLOBAL CENTRAL ──
+   Uma única função para TODAS as acções reais desta fase (guardar nome,
+   guardar telefone, activar/cancelar papel, pedir verificação). Nunca usa
+   um temporizador artificial — o loader só desaparece quando a Promise
+   real passada em `action` resolve ou rejeita. Também protege o botão
+   que despoletou a acção contra duplo clique enquanto está em curso. */
+function showGlobalLoader(message){
+  let el = document.getElementById('globalLoader');
+  if(!el){ el = document.createElement('div'); el.id='globalLoader'; document.body.appendChild(el); }
+  el.innerHTML = '<div class="gl-backdrop"><div class="gl-box"><div class="gl-spinner"></div><div class="gl-msg">'+escHtml(message)+'</div></div></div>';
+}
+function hideGlobalLoader(){
+  const el = document.getElementById('globalLoader');
+  if(el) el.innerHTML = '';
+}
+function showGlobalToast(message, isError){
+  let el = document.getElementById('globalToast');
+  if(!el){ el = document.createElement('div'); el.id='globalToast'; el.className='gtoast'; document.body.appendChild(el); }
+  el.textContent = message;
+  el.className = 'gtoast ' + (isError?'gtoast-err':'gtoast-ok');
+  // reflow forçado para reiniciar a transição mesmo em toasts consecutivos
+  void el.offsetWidth;
+  el.classList.add('show');
+  clearTimeout(window.__gtoastTimer);
+  window.__gtoastTimer = setTimeout(function(){ el.classList.remove('show'); }, 2800);
+}
+/* runWithLoader(btnEl, message, action, okMessage?)
+   - btnEl: o botão que disparou a acção (ou null). Fica disabled durante
+     a operação — protecção real contra duplo clique, não apenas visual.
+   - message: texto mostrado no loader ENQUANTO a operação corre.
+   - action: função que devolve a Promise real (a chamada ao Firebase).
+   - okMessage: opcional, texto do toast de sucesso.
+   Se btnEl já estiver disabled (operação anterior ainda em curso),
+   ignora silenciosamente o novo clique. */
+function runWithLoader(btnEl, message, action, okMessage){
+  if(btnEl && btnEl.disabled) return Promise.resolve();
+  if(btnEl) btnEl.disabled = true;
+  showGlobalLoader(message);
+  return Promise.resolve().then(action)
+    .then(function(result){
+      hideGlobalLoader();
+      if(btnEl) btnEl.disabled = false;
+      if(okMessage) showGlobalToast(okMessage, false);
+      return result;
+    })
+    .catch(function(err){
+      hideGlobalLoader();
+      if(btnEl) btnEl.disabled = false;
+      console.error(message, err);
+      showGlobalToast('Não foi possível concluir: ' + (err && (err.message||err.code) || 'erro desconhecido'), true);
+      throw err;
+    });
+}
 function verificationLabel(){
   const status = (AUTH.userDoc && AUTH.userDoc.verificationStatus) || 'UNVERIFIED';
   if(AUTH.hasPendingVerification && status!=='VERIFIED') return 'Pendente de revisão';
@@ -732,19 +941,36 @@ const RENDERERS = {
 'identidade:contas': ()=>{
   if(!AUTH.uid) return loginGate('Entra para veres e geres a tua conta.');
   const u = AUTH.userDoc || {};
+  const roleStateLabel = {NONE:'Não solicitado', PENDING:'Pendente', ACTIVE:'Ativo', SUSPENDED:'Suspenso'};
+  const roleStatePillClass = {NONE:'pill-n', PENDING:'pill-v', ACTIVE:'pill-g', SUSPENDED:'pill-r'};
+  const rolesForSummary = (u.roles||['CUSTOMER']).filter(function(r){return r!=='AFFILIATE';});
   return `
   <p class="page-sub">Uma identidade central por pessoa. Os papéis abaixo determinam o que esta conta pode fazer — não são contas separadas.</p>
   <div class="stat-row">
-    <div class="stat-card"><div class="stat-lbl">Nome</div><div class="stat-val" style="font-size:16px">${escHtml(u.name||AUTH.user.displayName||'—')}</div></div>
+    <div class="stat-card">
+      <div class="stat-lbl">Nome</div>
+      <div class="stat-val" style="font-size:16px" id="nameDisplay">${escHtml(u.name||AUTH.user.displayName||'—')}</div>
+      <button class="btn bo bsm" style="margin-top:8px" onclick="startEditName()">Editar nome</button>
+    </div>
     <div class="stat-card"><div class="stat-lbl">Email</div><div class="stat-val" style="font-size:16px">${escHtml(AUTH.user.email||'—')}</div></div>
-    <div class="stat-card"><div class="stat-lbl">Telefone</div><div class="stat-val" style="font-size:16px">${escHtml(u.phone||'Não definido')}</div></div>
+    <div class="stat-card">
+      <div class="stat-lbl">Telefone</div>
+      <div class="stat-val" style="font-size:16px" id="phoneDisplay">${escHtml(u.phone||'Não definido')}</div>
+      <button class="btn bo bsm" style="margin-top:8px" onclick="startEditPhone()">Editar telefone</button>
+    </div>
     <div class="stat-card"><div class="stat-lbl">UID (identificador real)</div><div class="stat-val" style="font-size:12px;font-family:monospace">${AUTH.uid}</div></div>
   </div>
   <div class="grid">
     <div class="card">
-      <div class="card-tit">Papéis activos</div>
-      <div class="card-desc">${(u.roles||['CUSTOMER']).map(r=>ROLE_LABELS[r]).join(' · ')}</div>
-      <button class="btn bo bsm" onclick="go('identidade','papeis')">Gerir papéis →</button>
+      <div class="card-tit">Papéis e solicitações</div>
+      ${rolesForSummary.map(function(r){
+        const statusField = COMMERCIAL_ROLE_STATUS_FIELD[r];
+        const stateKey = statusField ? (u[statusField]||'NONE') : 'ACTIVE';
+        const stateLabel = statusField ? (roleStateLabel[stateKey] || stateKey) : 'Ativo';
+        const pillClass = statusField ? (roleStatePillClass[stateKey] || 'pill-n') : 'pill-g';
+        return `<div class="card-desc" style="display:flex;justify-content:space-between;align-items:center;gap:10px"><span>${ROLE_LABELS[r]}</span><span class="pill ${pillClass}">${stateLabel}</span></div>`;
+      }).join('')}
+      <button class="btn bo bsm" style="margin-top:10px" onclick="go('identidade','papeis')">Gerir papéis →</button>
     </div>
     <div class="card">
       <div class="card-tit">Verificação</div>
@@ -753,7 +979,7 @@ const RENDERERS = {
     </div>
   </div>
   <button class="btn bo" style="margin-top:20px" onclick="logout()">Sair da conta</button>
-  ${mockNote('edição de nome/telefone/foto e 2FA ainda não têm UI — os campos já existem em users/{uid} e podem ser escritos pelo dono via Firestore rules.')}`;
+  ${mockNote('edição de foto e 2FA ainda não têm UI — os campos já existem em users/{uid} e podem ser escritos pelo dono via Firestore rules.')}`;
 },
 
 'identidade:papeis': ()=>{
@@ -768,42 +994,57 @@ const RENDERERS = {
     FREELANCER:'Candidata-se a projectos publicados por outros.'
   };
   // Papel ≠ estado comercial. Ter o papel só abre o pedido; quem decide
-  // se a conta pode operar de facto (PENDING → ACTIVE) é um processo do
-  // lado do servidor, ainda por implementar nesta fase — aqui só se
-  // mostra o estado actual, sem nenhum botão para o cliente o alterar.
-  const commercialStatusField = {SELLER:'sellerStatus', SERVICE_PROVIDER:'serviceProviderStatus', FREELANCER:'freelancerStatus'};
-  const statusLabel = {NONE:null, PENDING:'Estatuto comercial: pendente de aprovação', ACTIVE:'Estatuto comercial: activo', SUSPENDED:'Estatuto comercial: suspenso'};
-  const statusPillClass = {PENDING:'pill-v', ACTIVE:'pill-g', SUSPENDED:'pill-r'};
+  // se a conta pode operar de facto (PENDING → ACTIVE) é sempre um admin,
+  // via approveCommercialStatus (ver functions/index.js) — nunca o dono.
   return `
   <p class="page-sub">Activa ou desactiva papéis livremente — cada escrita é validada pelas Firestore rules do servidor, não apenas pela interface. Nunca vais ver um botão de "Admin" aqui: esse papel não existe em Firestore, é atribuído fora da aplicação.</p>
   <div class="grid">
-    ${SELF_SERVICE_ROLES.map(r=>{
+    ${SELF_SERVICE_ROLES.filter(function(r){return r!=='AFFILIATE';}).map(r=>{
       const on = current.includes(r);
-      const statusField = commercialStatusField[r];
+      const statusField = COMMERCIAL_ROLE_STATUS_FIELD[r];
       const commercialStatus = statusField ? ((AUTH.userDoc && AUTH.userDoc[statusField]) || 'NONE') : null;
-      const statusText = commercialStatus ? statusLabel[commercialStatus] : null;
+
+      // Sem ambiguidade entre "papel ligado" e "estatuto comercial": para
+      // papéis comerciais (SELLER/SERVICE_PROVIDER/FREELANCER), o texto,
+      // a cor e o botão dependem SEMPRE do estatuto real guardado no
+      // Firestore — nunca da simples presença do papel em "roles".
+      // Nunca existe um caminho aqui para mostrar/escrever ACTIVE — isso
+      // só a Cloud Function approveCommercialStatus faz, e as Firestore
+      // rules continuam a ser a autoridade de segurança final.
+      let statusPillHtml = '';
+      let buttonHtml;
+      if(!statusField){
+        buttonHtml = `<button class="role-chip ${on?'on':''}" onclick="toggleSelfRole('${r}', this)">${on?'✓ Activo — clica para desactivar':'Activar'}</button>`;
+      } else if(commercialStatus==='PENDING'){
+        statusPillHtml = `<span class="pill pill-v" style="margin-bottom:10px;display:inline-block">Pendente de aprovação</span>`;
+        buttonHtml = `<button class="role-chip" onclick="toggleSelfRole('${r}', this)">Cancelar solicitação</button>`;
+      } else if(commercialStatus==='ACTIVE'){
+        statusPillHtml = `<span class="pill pill-g" style="margin-bottom:10px;display:inline-block">Activo</span>`;
+        buttonHtml = `<button class="role-chip on" onclick="toggleSelfRole('${r}', this)">Desactivar</button>`;
+      } else if(commercialStatus==='SUSPENDED'){
+        statusPillHtml = `<span class="pill pill-r" style="margin-bottom:10px;display:inline-block">Suspenso</span>`;
+        buttonHtml = `<button class="role-chip" disabled>Suspenso pelo administrador</button>`;
+      } else {
+        statusPillHtml = `<span class="pill pill-n" style="margin-bottom:10px;display:inline-block">Não solicitado</span>`;
+        buttonHtml = `<button class="role-chip" onclick="toggleSelfRole('${r}', this)">Activar</button>`;
+      }
+
       return `<div class="card">
         <div class="card-ic">${roleIcons[r]}</div>
         <div class="card-tit">${ROLE_LABELS[r]}</div>
         <div class="card-desc">${roleDesc[r]}</div>
-        ${on && statusText ? `<span class="pill ${statusPillClass[commercialStatus]}" style="margin-bottom:10px;display:inline-block">${statusText}</span>` : ''}
-        <button class="role-chip ${on?'on':''}" onclick="toggleSelfRole('${r}')">${on?'✓ Activo — clica para desactivar':'Activar'}</button>
+        ${statusPillHtml}
+        ${buttonHtml}
       </div>`;
     }).join('')}
-    <div class="card" style="opacity:.6">
-      <div class="card-ic">⚙️</div>
-      <div class="card-tit">Admin</div>
-      <div class="card-desc">Gere utilizadores, ofertas, moderação e financeiro. Nunca auto-atribuível — só via Cloud Function invocada por outro admin, ou script de arranque com credenciais de servidor.</div>
-      <button class="role-chip" disabled>Não disponível aqui</button>
-    </div>
   </div>`;
 },
 
 'identidade:verificacao': ()=>{
   if(!AUTH.uid) return loginGate('Entra para veres o estado de verificação da tua conta.');
   const status = (AUTH.userDoc && AUTH.userDoc.verificationStatus) || 'UNVERIFIED';
-  const canRequest = status==='UNVERIFIED' || status==='REJECTED';
   const showPending = AUTH.hasPendingVerification || status==='PENDING';
+  const needsBack = verifDocNeedsBack(VERIF_FORM.docType);
   return `
   <p class="page-sub">O estado só muda por decisão de um admin (Cloud Function <code>reviewVerification</code>). Nenhum botão nesta página consegue escrever directamente <code>verificationStatus</code> — a Firestore rule bloqueia essa escrita ao dono da conta.</p>
   <div class="card" style="max-width:460px">
@@ -813,11 +1054,28 @@ const RENDERERS = {
       ? `<div class="card-desc">Pedido enviado. Aguarda revisão por um administrador.</div>`
       : status==='VERIFIED'
         ? `<div class="card-desc">Conta verificada.</div>`
-        : `<div class="card-desc" style="margin-bottom:12px">${status==='REJECTED' ? 'O pedido anterior foi rejeitado. Podes submeter um novo.' : 'Ainda não submeteste nenhum pedido de verificação.'}</div>
-           <button class="btn bv" onclick="requestVerification()">Submeter para verificação</button>`
+        : `
+          <div class="card-desc" style="margin-bottom:12px">${status==='REJECTED' ? 'O pedido anterior foi rejeitado. Podes submeter um novo.' : 'Ainda não submeteste nenhum pedido de verificação.'}</div>
+          <label style="display:block;font-size:12px;font-weight:700;color:var(--g3lt);margin-bottom:6px">Tipo de documento</label>
+          <select onchange="onVerifDocTypeChange(this)" style="width:100%;padding:9px;border-radius:8px;border:1px solid var(--g1);margin-bottom:12px">
+            <option value="" ${!VERIF_FORM.docType?'selected':''}>Escolhe...</option>
+            <option value="BI" ${VERIF_FORM.docType==='BI'?'selected':''}>Bilhete de Identidade</option>
+            <option value="PASSAPORTE" ${VERIF_FORM.docType==='PASSAPORTE'?'selected':''}>Passaporte</option>
+            <option value="CARTA" ${VERIF_FORM.docType==='CARTA'?'selected':''}>Carta de Condução</option>
+          </select>
+          ${VERIF_FORM.docType ? `
+          <label style="display:block;font-size:12px;font-weight:700;color:var(--g3lt);margin-bottom:6px">Documento — frente</label>
+          <input type="file" accept="image/*,application/pdf" onchange="onVerifFileChange('front', this)" style="margin-bottom:12px;width:100%"/>
+          ${needsBack ? `
+          <label style="display:block;font-size:12px;font-weight:700;color:var(--g3lt);margin-bottom:6px">Documento — verso</label>
+          <input type="file" accept="image/*,application/pdf" onchange="onVerifFileChange('back', this)" style="margin-bottom:12px;width:100%"/>` : ''}
+          <button class="btn bv" onclick="submitVerificationRequest(this)">Submeter pedido de verificação</button>
+          <div id="verifSubmitErr" class="auth-err"></div>
+          ` : ''}
+        `
     }
   </div>
-  ${mockNote('upload de documento de identidade ainda não tem UI — o pedido cria só o registo verificationRequests; a revisão (aprovar/rejeitar) acontece no futuro painel Admin, chamando a Cloud Function reviewVerification.')}`;
+  ${mockNote('o envio efectivo dos ficheiros ainda depende de Firebase Storage (plano Blaze), ainda não activado — por agora, submeter regista só o pedido em verificationRequests (PENDING), exactamente como antes; a análise do documento em si terá de ser combinada com o admin por outro meio até o Storage estar pronto.')}`;
 },
 
 /* ── MARKETPLACE ── */
