@@ -114,9 +114,14 @@ img{display:block;max-width:100%}
 /* ═══ LOADER LOCAL — por botão/componente, para acções menores (guardar
    nome/telefone, activar/cancelar/desactivar papel, aprovar, rejeitar,
    guardar configurações). Nunca ocupa o ecrã inteiro. ═══ */
-.ll-spin{display:inline-block;width:12px;height:12px;border-radius:50%;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;margin-right:7px;vertical-align:-2px;animation:ll-spin .6s linear infinite}
-@keyframes ll-spin{to{transform:rotate(360deg)}}
-@media(prefers-reduced-motion:reduce){.ll-spin{animation-duration:1.6s}}
+/* LOADER MINIMIZADO — MESMA identidade visual do Loader Principal
+   (badge "IP" + anel verde a girar), só que a uma escala reduzida para
+   caber inline num botão/componente. Não é um spinner diferente: é a
+   redução directa de .gl-badge-wrap/.gl-ring/.gl-badge. */
+.gl-mini-wrap{position:relative;width:16px;height:16px;display:inline-flex;align-items:center;justify-content:center;flex:none;margin-right:7px;vertical-align:-3px}
+.gl-mini-ring{position:absolute;inset:0;border-radius:50%;border:2px solid rgba(148,163,184,.25);border-top-color:var(--v);border-right-color:var(--vlt);animation:gl-ring-spin 1.1s linear infinite}
+.gl-mini-badge{width:9px;height:9px;border-radius:2.5px;background:#0B1220;border:1px solid rgba(34,197,94,.55);display:flex;align-items:center;justify-content:center;font-family:'Satoshi',sans-serif;font-weight:800;font-size:5px;color:#fff;letter-spacing:0}
+@media(prefers-reduced-motion:reduce){.gl-mini-ring{animation-duration:1.6s}}
 
 /* ═══ SKELETON LOADING — base reutilizável, preparada para o redesign
    (listas de produtos/serviços/pedidos/notificações). Não usada ainda
@@ -468,7 +473,14 @@ function doPasswordReset(){
     errEl.style.color='var(--red)'; errEl.textContent=translateAuthError(err.code);
   });
 }
-function logout(){ fbAuth.signOut(); }
+/* Logout usa o Loader Minimizado (não o ecrã inteiro) — é uma acção
+   local ao botão que a despoletou, com uma operação Firebase real
+   (signOut()) por trás, não um efeito instantâneo. */
+function logout(btnEl){
+  runWithLocalLoader(btnEl, 'A terminar sessão…', function(){
+    return fbAuth.signOut();
+  }, { successText: 'Sessão terminada' }).catch(function(){ /* runWithLocalLoader já mostrou o erro real (toast) */ });
+}
 
 /* Cria users/{uid} + profiles/{uid} na primeira vez que a conta existe.
    Valores de arranque batem exactamente com o que as Firestore rules exigem
@@ -908,18 +920,24 @@ function escHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c)
 
 /* ══════════════════════════════════════════════════════════════
    SISTEMA CENTRAL DE LOADING — IP Digital AO
-   Fonte única de verdade. Três níveis, cada um com finalidade própria:
+   Fonte única de verdade. UM ÚNICO componente visual oficial
+   (badge "IP" + anel verde a girar), em duas escalas:
 
-   A) GLOBAL — ecrã inteiro, visual oficial (badge IP + anel + wordmark
-      + barra). Só para operações críticas/bloqueantes: autenticação,
-      criação de conta, recuperação de senha, bootstrap de sessão,
-      operações administrativas importantes.
-   B) LOCAL — por botão/componente, sem tocar o ecrã inteiro. Para
-      acções menores: guardar nome/telefone, activar/cancelar/
-      desactivar papel, aprovar/rejeitar, guardar configurações.
-   C) SKELETON — placeholders de conteúdo (não acções). Preparado para
-      o redesign (listas de produtos/serviços/pedidos), não usado
-      ainda em nenhuma página real desta fase.
+   A) GLOBAL — ecrã inteiro: badge + anel + wordmark "IP DIGITAL.AO" +
+      barra indeterminada. Só para operações críticas/bloqueantes:
+      autenticação, criação de conta, recuperação de senha, bootstrap
+      de sessão, operações administrativas importantes.
+   B) LOCAL / MINIMIZADO — badge + anel reduzidos, inline no próprio
+      botão/componente, sem wordmark nem barra (não cabem à escala).
+      Para acções menores: guardar nome/telefone, activar/cancelar/
+      desactivar papel, pedir verificação, logout, aprovar/rejeitar.
+
+   Nenhuma das duas é um design à parte — B é literalmente uma redução
+   de A (mesmo badge, mesmo anel, mesma cor). Nunca spinner genérico,
+   nunca emoji, nunca outro símbolo.
+
+   C) SKELETON — placeholders de conteúdo (não acções), sistema à
+      parte, preparado para o redesign, não usado ainda nesta fase.
 
    Nenhuma operação Firebase desta fase deve inventar o próprio
    spinner — todas passam por aqui. Nunca usa setTimeout para fingir
@@ -1000,6 +1018,13 @@ function runWithGlobalLoader(message, action, okMessage){
    volta ao normal, ou breve "Guardado" antes de voltar). Nunca usa o
    ecrã inteiro. Guarda de duplo clique via dataset.glBusy — o SEGUNDO
    clique é ignorado enquanto o primeiro ainda corre. */
+/* ── B) LOCAL / MINIMIZADO (por botão/componente) ──
+   Reduz o MESMO Loader Principal (badge IP + anel verde) para caber
+   inline no botão — não é um spinner diferente. O botão mostra o
+   estado ("Guardar" → [IP⟳] "A guardar…" → volta ao normal, ou breve
+   "Guardado" antes de voltar). Nunca usa o ecrã inteiro. Guarda de
+   duplo clique via dataset.glBusy — o SEGUNDO clique é ignorado
+   enquanto o primeiro ainda corre. */
 function showLocalLoader(btnEl, processingText){
   if(!btnEl || btnEl.dataset.glBusy==='1') return;
   btnEl.dataset.glBusy = '1';
@@ -1007,7 +1032,9 @@ function showLocalLoader(btnEl, processingText){
   btnEl.style.minWidth = btnEl.offsetWidth + 'px'; // evita o botão "encolher" ao trocar o texto
   btnEl.disabled = true;
   btnEl.setAttribute('aria-busy','true');
-  btnEl.innerHTML = '<span class="ll-spin" aria-hidden="true"></span>' + escHtml(processingText || 'A processar…');
+  btnEl.innerHTML =
+    '<span class="gl-mini-wrap" aria-hidden="true"><span class="gl-mini-ring"></span><span class="gl-mini-badge">IP</span></span>'
+    + escHtml(processingText || 'A processar…');
 }
 function hideLocalLoader(btnEl, finalText){
   if(!btnEl) return;
@@ -1166,9 +1193,12 @@ const RENDERERS = {
       <div class="card-tit">Verificação</div>
       <div class="card-desc" style="margin-bottom:10px">${verificationLabel()}</div>
       <span class="status-badge status-${u.verificationStatus||'UNVERIFIED'}">${verificationLabel()}</span>
+      ${(!(AUTH.hasPendingVerification || u.verificationStatus==='PENDING') && u.verificationStatus!=='VERIFIED')
+        ? `<div style="margin-top:10px"><button class="btn bv bsm" onclick="go('identidade','verificacao')">Solicitar verificação</button></div>`
+        : ''}
     </div>
   </div>
-  <button class="btn bo" style="margin-top:20px" onclick="logout()">Sair da conta</button>
+  <button class="btn bo" style="margin-top:20px" onclick="logout(this)">Sair da conta</button>
   ${mockNote('edição de foto e 2FA ainda não têm UI — os campos já existem em users/{uid} e podem ser escritos pelo dono via Firestore rules.')}`;
 },
 
