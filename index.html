@@ -1259,9 +1259,11 @@ const RENDERERS = {
           ${needsBack ? `
           <label style="display:block;font-size:12px;font-weight:700;color:var(--g3lt);margin-bottom:6px">Documento — verso</label>
           <input type="file" accept="image/*,application/pdf" onchange="onVerifFileChange('back', this)" style="margin-bottom:12px;width:100%"/>` : ''}
-          <button class="btn bv" onclick="submitVerificationRequest(this)">Submeter pedido de verificação</button>
+          ` : `
+          <div class="card-desc" style="margin-bottom:12px;font-size:12px;color:var(--g3lt)">Escolhe o tipo de documento acima para anexares a frente (e o verso, se aplicável) antes de submeter — mas já podes submeter o pedido sem isso, e tratamos do documento à parte com o administrador.</div>
+          `}
+          <button class="btn bv" onclick="submitVerificationRequest(this)">Solicitar análise de verificação</button>
           <div id="verifSubmitErr" class="auth-err"></div>
-          ` : ''}
         `
     }
   </div>
